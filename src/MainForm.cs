@@ -34,6 +34,9 @@ namespace DSHDesktop
         private ToolStripButton btnStore;
         private ToolStripButton btnChat;
         private ToolStripButton btnReload;
+        private ToolStripButton btnLan;
+        private bool lanMode = false;
+        private string savedDshRoot;
         private StoreServer storeServer;
         private const string BaseUrl = "http://127.0.0.1:3080";
 
@@ -54,15 +57,19 @@ namespace DSHDesktop
             btnChat = new ToolStripButton("聊天");
             btnStore = new ToolStripButton("扩展商店");
             btnReload = new ToolStripButton("刷新");
+            btnLan = new ToolStripButton("局域网访问");
             toolStrip.Items.Add(btnChat);
             toolStrip.Items.Add(btnStore);
             toolStrip.Items.Add(new ToolStripSeparator());
             toolStrip.Items.Add(btnReload);
+            toolStrip.Items.Add(new ToolStripSeparator());
+            toolStrip.Items.Add(btnLan);
             Controls.Add(toolStrip);
 
             btnStore.Click += delegate { GoStore(); };
             btnChat.Click += delegate { GoChat(); };
             btnReload.Click += delegate { if (webViewReady) webView.Reload(); };
+            btnLan.Click += delegate { ToggleLan(); };
             btnChat.Enabled = false;
 
             statusLabel = new Label();
@@ -146,6 +153,7 @@ namespace DSHDesktop
         private async Task Boot()
         {
             string dshRoot = FindDshRoot();
+            savedDshRoot = dshRoot;
             if (dshRoot == null)
             {
                 statusLabel.Text = "找不到 DSH 运行时。\n\n可设置环境变量 DSH_DESKTOP_DSH_DIR 指向 dsh 目录后重试。";
@@ -176,7 +184,7 @@ namespace DSHDesktop
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo(nodeExe);
-                psi.Arguments = "\"" + bin + "\" web --host 127.0.0.1 --port 3080";
+                psi.Arguments = "\"" + bin + "\" web --host " + LanHost() + " --port 3080";
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
                 psi.WorkingDirectory = dshRoot;
@@ -275,6 +283,110 @@ namespace DSHDesktop
                 storeView.Visible = false;
             }
             webView.BringToFront();
+        }
+
+        private string LanHost()
+        {
+            return lanMode ? "0.0.0.0" : "127.0.0.1";
+        }
+
+        private async void ToggleLan()
+        {
+            if (!webViewReady) return;
+            if (!ownProcess)
+            {
+                MessageBox.Show("当前连接的是外部已启动的 DSH 服务（如网页版），无法切换监听地址。\n\n请先关闭网页版，只由本程序启动服务后再试。", "提示");
+                return;
+            }
+            if (!lanMode)
+            {
+                DialogResult r = MessageBox.Show(
+                    "开启局域网访问后，同一网络内的设备（如手机）都能打开并控制本工作区。\n\n" +
+                    "⚠️ 安全提醒：请只在可信的家庭/办公网络使用；不要做公网端口转发或内网穿透；用完后请点此按钮关闭。\n\n" +
+                    "确定开启吗？",
+                    "局域网访问", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (r != DialogResult.Yes) return;
+            }
+            lanMode = !lanMode;
+            btnLan.Text = lanMode ? "局域网：开" : "局域网访问";
+            if (dshProcess != null && !dshProcess.HasExited)
+            {
+                try { dshProcess.Kill(); } catch { }
+            }
+            await RestartServer();
+        }
+
+        private async Task RestartServer()
+        {
+            string dshRoot = savedDshRoot;
+            if (string.IsNullOrEmpty(dshRoot)) return;
+            string bin = Path.Combine(dshRoot, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
+            string nodeExe = FindNode(dshRoot);
+            if (!File.Exists(bin) || nodeExe == null)
+            {
+                statusLabel.Text = "重启失败：找不到运行时";
+                return;
+            }
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(nodeExe);
+                psi.Arguments = "\"" + bin + "\" web --host " + LanHost() + " --port 3080";
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.WorkingDirectory = dshRoot;
+                psi.EnvironmentVariables["DSH_HOME"] = DshHomeDir();
+                dshProcess = Process.Start(psi);
+                ownProcess = true;
+            }
+            catch (Exception ex)
+            {
+                statusLabel.Text = "重启服务失败：" + ex.Message;
+                return;
+            }
+
+            System.Windows.Forms.Timer t = new System.Windows.Forms.Timer();
+            t.Interval = 700;
+            t.Tick += delegate
+            {
+                if (ServerUp())
+                {
+                    t.Stop();
+                    webView.Reload();
+                    if (lanMode)
+                    {
+                        string ip = GetLanIp();
+                        MessageBox.Show(
+                            "✅ 局域网访问已开启！\n\n" +
+                            "手机连接同一 WiFi 后，浏览器打开：\nhttp://" + ip + ":3080\n\n" +
+                            "（或直接在 DSH 界面扫「移动端远程控制」二维码）\n\n" +
+                            "⚠️ 用完后点顶部「局域网访问」按钮关闭。",
+                            "局域网访问已开启");
+                    }
+                }
+            };
+            t.Start();
+        }
+
+        private static string GetLanIp()
+        {
+            try
+            {
+                foreach (System.Net.NetworkInformation.NetworkInterface ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+                    foreach (System.Net.NetworkInformation.UnicastIPAddressInformation ip in ni.GetIPProperties().UnicastAddresses)
+                    {
+                        if (ip.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                        {
+                            string s = ip.Address.ToString();
+                            if (s.StartsWith("192.168.") || s.StartsWith("10.") || s.StartsWith("172.")) return s;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return "本机IP";
         }
 
         private void OnFormClosing(object sender, FormClosingEventArgs e)
