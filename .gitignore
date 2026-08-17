@@ -1,0 +1,14 @@
+# 构建产物
+DeepSeek.Harness.Desktop.exe
+DeepSeek.Harness.Desktop-Setup.exe
+*.WebView2/
+node/
+_node.pak
+
+# 运行时缓存
+*.WebView2/
+EBWebView/
+
+# 系统
+Thumbs.db
+Desktop.ini
