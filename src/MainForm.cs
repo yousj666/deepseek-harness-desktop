@@ -23,6 +23,8 @@ namespace DSHDesktop
     public class MainForm : Form
     {
         private WebView2 webView;
+        private WebView2 storeView;
+        private bool storeViewReady = false;
         private Process dshProcess;
         private bool ownProcess = false;
         private System.Windows.Forms.Timer bootTimer;
@@ -236,6 +238,16 @@ namespace DSHDesktop
                 webView.Source = new Uri(BaseUrl);
                 btnChat.Enabled = true;
 
+                // 扩展商店：独立的叠加 WebView2，显示时盖在聊天上，返回时隐藏
+                // （不跳走主页面，聊天状态完整保留，不会"重新进来"）
+                storeView = new WebView2();
+                storeView.Dock = DockStyle.Fill;
+                storeView.Visible = false;
+                Controls.Add(storeView);
+                await storeView.EnsureCoreWebView2Async(env);
+                storeView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
+                storeViewReady = true;
+
                 // 启动本地商店服务
                 storeServer = new StoreServer(dshRoot);
                 storeServer.Start();
@@ -248,14 +260,21 @@ namespace DSHDesktop
 
         private void GoStore()
         {
-            if (!webViewReady || storeServer == null) return;
-            webView.Source = new Uri("http://127.0.0.1:" + storeServer.Port + "/store");
+            if (!webViewReady || storeServer == null || !storeViewReady) return;
+            storeView.Visible = true;
+            storeView.BringToFront();
+            storeView.Source = new Uri("http://127.0.0.1:" + storeServer.Port + "/store");
         }
 
         private void GoChat()
         {
             if (!webViewReady) return;
-            webView.Source = new Uri(BaseUrl);
+            if (storeViewReady && storeView.Visible)
+            {
+                // 只是收起商店叠层，主聊天界面从未离开，状态原样保留
+                storeView.Visible = false;
+            }
+            webView.BringToFront();
         }
 
         private void OnFormClosing(object sender, FormClosingEventArgs e)
