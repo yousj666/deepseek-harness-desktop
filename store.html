@@ -35,6 +35,9 @@
   .install:disabled { background: var(--dim); cursor: default; }
   .installed-tag { color: var(--ok); font-size: 12px; }
   .out { grid-column: 1 / -1; background: #0a0c11; border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; max-height: 300px; overflow: auto; color: var(--dim); }
+  .prog { display: none; position: relative; height: 16px; background: #232936; border-radius: 8px; overflow: hidden; }
+  .prog-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; background: linear-gradient(90deg, #3a7bff, #5b9bff); border-radius: 8px; transition: width .35s ease; }
+  .prog-text { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #cfe0ff; }
   #loading { text-align: center; padding: 60px; color: var(--dim); }
   .empty { text-align: center; padding: 60px; color: var(--dim); }
 </style>
@@ -107,7 +110,8 @@ function makeCard(p) {
     <div class="actions">
       <button class="install" data-name="${p.name}" ${isInstalled ? 'disabled' : ''}>${isInstalled ? '已安装 ✓' : '安装'}</button>
       ${isInstalled ? '<span class="installed-tag">已在本机</span>' : ''}
-    </div>`;
+    </div>
+    <div class="prog"><div class="prog-fill"></div><span class="prog-text">0%</span></div>`;
   return card;
 }
 
@@ -135,7 +139,9 @@ function render() {
           <div class="actions">
             <button class="install" data-name="${p.name}" ${isInstalled ? 'disabled' : ''}>${isInstalled ? '已安装 ✓' : '安装'}</button>
             ${isInstalled ? '<span class="installed-tag">已在本机</span>' : ''}
-          </div></div>`;
+          </div>
+          <div class="prog"><div class="prog-fill"></div><span class="prog-text">0%</span></div>
+        </div>`;
       }).join('') + '</div>';
     hot.style.display = '';
   } else {
@@ -155,33 +161,64 @@ function render() {
     if (btn.disabled) return;
     btn.onclick = async () => {
       const name = btn.getAttribute('data-name');
+      const card = btn.closest('.card');
+      const prog = card.querySelector('.prog');
+      const fill = card.querySelector('.prog-fill');
+      const ptext = card.querySelector('.prog-text');
       btn.disabled = true;
-      btn.textContent = "安装中...";
-      const out = document.createElement('div');
-      out.className = 'out';
-      out.textContent = "正在安装 " + name + " ...（首次安装可能需要几分钟，请耐心等待）\n";
-      list.appendChild(out);
-      out.scrollIntoView();
+      btn.textContent = "安装中";
+      prog.style.display = 'block';
+      fill.style.background = 'linear-gradient(90deg, #3a7bff, #5b9bff)';
+      ptext.textContent = "0%";
+
+      let j;
       try {
-        const r = await fetch(API + "/install?name=" + encodeURIComponent(name));
-        const j = await r.json();
-        out.textContent += (j.output || "（无输出）");
-        if (j.ok && j.output && j.output.indexOf("exit=0") >= 0) {
-          out.style.color = "var(--ok)";
-          out.textContent += "\n\n✅ 安装完成！重启 DSH 后生效。";
-          btn.textContent = "已安装 ✓";
-          installed.add(name);
-        } else {
-          out.style.color = "var(--err)";
-          out.textContent += "\n\n⚠️ 安装未成功，请检查上方输出。";
-          btn.textContent = "重试";
-          btn.disabled = false;
-        }
+        j = await (await fetch(API + "/install?name=" + encodeURIComponent(name))).json();
       } catch (e) {
-        out.textContent += "\n请求失败：" + e.message;
-        btn.textContent = "重试";
-        btn.disabled = false;
+        ptext.textContent = "请求失败"; btn.textContent = "重试"; btn.disabled = false;
+        return;
       }
+      if (!j.ok) {
+        ptext.textContent = "失败"; btn.textContent = "重试"; btn.disabled = false;
+        return;
+      }
+      const taskId = j.taskId;
+      let pct = 0;
+
+      const iv = setInterval(async () => {
+        let s;
+        try {
+          s = await (await fetch(API + "/status?taskId=" + encodeURIComponent(taskId))).json();
+        } catch (e) { return; }
+        if (!s || s.ok === false) { clearInterval(iv); ptext.textContent = "失败"; btn.textContent = "重试"; btn.disabled = false; return; }
+
+        if (s.status === 'success') {
+          clearInterval(iv);
+          fill.style.width = '100%';
+          ptext.textContent = '100%';
+          btn.textContent = '已安装 ✓';
+          installed.add(name);
+          setTimeout(() => { ptext.textContent = '已安装 ✓'; fill.style.background = 'linear-gradient(90deg, #2ea36b, #3ecf8e)'; }, 500);
+        } else if (s.status === 'error') {
+          clearInterval(iv);
+          fill.style.background = 'linear-gradient(90deg, #c73a3f, #ff6b6b)';
+          ptext.textContent = '安装失败';
+          btn.textContent = '重试';
+          btn.disabled = false;
+          if (s.output) {
+            const out = document.createElement('div');
+            out.className = 'out';
+            out.textContent = "安装失败，输出：\n" + s.output;
+            out.style.color = 'var(--err)';
+            card.after(out);
+          }
+        } else {
+          // running：平滑推进，最多到 90%，完成时跳 100
+          pct = Math.min(pct + 1.5 + Math.random() * 3, 90);
+          fill.style.width = pct + '%';
+          ptext.textContent = Math.round(pct) + '%';
+        }
+      }, 600);
     };
   });
 }

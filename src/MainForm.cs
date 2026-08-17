@@ -379,8 +379,26 @@ namespace DSHDesktop
                             }
                             else
                             {
-                                string output = RunInstall(name);
-                                body = "{\"ok\":true,\"output\":" + JsonEscape(output) + "}";
+                                string taskId = StartInstall(name);
+                                body = "{\"ok\":true,\"taskId\":" + JsonEscape(taskId) + "}";
+                            }
+                            contentType = "application/json; charset=utf-8";
+                        }
+                        else if (path.StartsWith("/status?"))
+                        {
+                            string taskId = ParseQuery(path, "taskId");
+                            InstallTask t = null;
+                            lock (tasks)
+                            {
+                                if (!string.IsNullOrEmpty(taskId)) tasks.TryGetValue(taskId, out t);
+                            }
+                            if (t == null)
+                            {
+                                body = "{\"ok\":false,\"error\":\"task not found\"}";
+                            }
+                            else
+                            {
+                                body = TaskJson(t);
                             }
                             contentType = "application/json; charset=utf-8";
                         }
@@ -436,14 +454,35 @@ namespace DSHDesktop
             return null;
         }
 
-        private string RunInstall(string name)
+        private class InstallTask
+        {
+            public string Name;
+            public string Status = "running"; // running / success / error
+            public string Output = "";
+        }
+
+        private readonly Dictionary<string, InstallTask> tasks = new Dictionary<string, InstallTask>();
+        private int taskSeq = 0;
+
+        private string StartInstall(string name)
+        {
+            string taskId = "t" + (++taskSeq);
+            InstallTask task = new InstallTask { Name = name };
+            lock (tasks) tasks[taskId] = task;
+            Thread t = new Thread(delegate() { RunInstallTask(task, name); });
+            t.IsBackground = true;
+            t.Start();
+            return taskId;
+        }
+
+        private void RunInstallTask(InstallTask task, string name)
         {
             try
             {
                 string bin = Path.Combine(dshRoot, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
                 string nodeExe = MainForm.FindNode(dshRoot);
-                if (nodeExe == null) return "ERROR: node not found";
-                if (!File.Exists(bin)) return "ERROR: dsh bin not found: " + bin;
+                if (nodeExe == null) { task.Status = "error"; task.Output = "ERROR: node not found"; return; }
+                if (!File.Exists(bin)) { task.Status = "error"; task.Output = "ERROR: dsh bin not found: " + bin; return; }
 
                 string profile = ProfileName();
                 ProcessStartInfo psi = new ProcessStartInfo(nodeExe);
@@ -461,17 +500,27 @@ namespace DSHDesktop
                     if (!p.WaitForExit(600000))
                     {
                         try { p.Kill(); } catch { }
-                        return "安装超时（10 分钟）——pnpm 首次装包较慢，可稍后在商店重试";
                     }
                     string stdout = p.StandardOutput.ReadToEnd();
                     string stderr = p.StandardError.ReadToEnd();
-                    return "exit=" + p.ExitCode + "\n" + stdout + "\n" + stderr;
+                    task.Output = "exit=" + p.ExitCode + "\n" + stdout + "\n" + stderr;
+                    task.Status = (p.ExitCode == 0) ? "success" : "error";
                 }
             }
             catch (Exception ex)
             {
-                return "ERROR: " + ex.Message;
+                task.Output = "ERROR: " + ex.Message;
+                task.Status = "error";
             }
+        }
+
+        private string TaskJson(InstallTask t)
+        {
+            string tail = t.Output;
+            if (tail != null && tail.Length > 1200) tail = tail.Substring(tail.Length - 1200);
+            return "{\"status\":" + JsonEscape(t.Status) +
+                   ",\"name\":" + JsonEscape(t.Name) +
+                   ",\"output\":" + JsonEscape(tail == null ? "" : tail) + "}";
         }
 
         private string ProfileName()
